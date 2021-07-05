@@ -7,8 +7,9 @@ use crate::{
 use serde::{de, ser::SerializeSeq, Deserialize, Serialize};
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     borrow::Cow,
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::Hash,
 };
 
@@ -506,5 +507,53 @@ where
         A: serde::de::SeqAccess<'de>,
     {
         self.to_mut().apply(seq, ctx)
+    }
+}
+
+impl<T> SerdeDiff for Box<T>
+where
+    T: SerdeDiff,
+{
+    fn diff<'a, S: SerializeSeq>(
+        &self,
+        ctx: &mut crate::difference::DiffContext<'a, S>,
+        other: &Self,
+    ) -> Result<bool, S::Error> {
+        self.as_ref().diff(ctx, other)
+    }
+
+    fn apply<'de, A>(
+        &mut self,
+        seq: &mut A,
+        ctx: &mut crate::apply::ApplyContext,
+    ) -> Result<bool, <A as serde::de::SeqAccess<'de>>::Error>
+    where
+        A: de::SeqAccess<'de>,
+    {
+        self.as_mut().apply(seq, ctx)
+    }
+}
+
+impl<T> SerdeDiff for Cell<T>
+where
+    T: SerdeDiff + Copy,
+{
+    fn diff<'a, S: SerializeSeq>(
+        &self,
+        ctx: &mut crate::difference::DiffContext<'a, S>,
+        other: &Self,
+    ) -> Result<bool, S::Error> {
+        self.get().diff(ctx, &other.get())
+    }
+
+    fn apply<'de, A>(
+        &mut self,
+        seq: &mut A,
+        ctx: &mut crate::apply::ApplyContext,
+    ) -> Result<bool, <A as serde::de::SeqAccess<'de>>::Error>
+    where
+        A: de::SeqAccess<'de>,
+    {
+        self.get_mut().apply(seq, ctx)
     }
 }
