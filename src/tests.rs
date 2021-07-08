@@ -1,5 +1,6 @@
 use crate as serde_diff;
 use crate::{Apply, Diff, SerdeDiff};
+use insta::assert_yaml_snapshot;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -147,7 +148,7 @@ struct MyComplexStruct {
     b: u32,
 }
 
-#[derive(SerdeDiff, Serialize, Deserialize, Copy, Clone, PartialEq, Debug, Default)]
+#[derive(SerdeDiff, Serialize, Deserialize, Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
 #[serde(rename = "MyComplexStruct", default)]
 struct MySimpleStruct {
     a: u32,
@@ -256,7 +257,6 @@ fn test_cow() {
     );
 }
 
-
 #[test]
 fn test_box() {
     roundtrip(
@@ -268,7 +268,6 @@ fn test_box() {
         },
     );
 }
-
 
 #[test]
 fn test_cell() {
@@ -282,18 +281,331 @@ fn test_cell() {
     );
 }
 
-
-#[derive(PartialEq, Eq, Debug, Clone)]
-#[derive(Serialize, Deserialize)]
-#[derive(SerdeDiff)]
+#[derive(PartialEq, Eq, Debug, Clone, Serialize, Deserialize, SerdeDiff)]
 #[serde_diff(opaque)]
 struct Foo<'a>(Cow<'a, [u8]>);
-
 
 #[test]
 fn test_generic_opaque() {
     roundtrip(
-        Foo(Cow::Owned(vec![1,2,3])),
-        Foo(Cow::Owned(vec![1,2,3])),
+        Foo(Cow::Owned(vec![1, 2, 3])),
+        Foo(Cow::Owned(vec![1, 2, 3])),
     );
+}
+
+#[cfg(feature = "im")]
+#[test]
+fn test_immutable_simple() {
+    use im::HashMap;
+    use std::{collections::hash_map::DefaultHasher, hash::BuildHasherDefault};
+    type Hasher = BuildHasherDefault<DefaultHasher>;
+
+    let mut this = HashMap::with_hasher(Hasher::default());
+
+    this.insert(0, MySimpleStruct { a: 0 });
+    this.insert(20, MySimpleStruct { a: 20 });
+    this.insert(300, MySimpleStruct { a: 300 });
+
+    let mut other = this.clone();
+
+    other.insert(20, MySimpleStruct { a: 25 });
+    other.remove(&300);
+    other.insert(4000, MySimpleStruct { a: 4000 });
+
+    let diff = Diff::serializable(&this, &other);
+
+    // Expect:
+    //   0 not present
+    //   20 updated
+    //   300 removed
+    //   4000 inserted
+    assert_yaml_snapshot!(diff, @r###"
+    ---
+    - EnterKey: 20
+    - Enter:
+        Field: a
+    - Value: 25
+    - Exit
+    - RemoveKey: 300
+    - AddKey: 4000
+    - Value:
+        a: 4000
+    - Exit
+    "###);
+
+    roundtrip(this, other);
+}
+
+#[derive(SerdeDiff, Serialize, Deserialize, PartialEq, Debug, Copy, Clone, Hash, Eq)]
+struct Simple {
+    a: usize,
+}
+
+#[derive(SerdeDiff, Serialize, Deserialize, PartialEq, Debug, Copy, Clone, Hash, Eq)]
+struct Complex {
+    a: Simple,
+    b: (usize, Option<usize>),
+}
+
+#[cfg(feature = "im")]
+#[test]
+fn test_immutable_complex() {
+    use im::HashMap;
+    use std::{collections::hash_map::DefaultHasher, hash::BuildHasherDefault};
+    type Hasher = BuildHasherDefault<DefaultHasher>;
+
+    let mut this = HashMap::with_hasher(Hasher::default());
+
+    this.insert(
+        Complex {
+            a: Simple { a: 0 },
+            b: (0, None),
+        },
+        Complex {
+            a: Simple { a: 0 },
+            b: (0, None),
+        },
+    );
+    this.insert(
+        Complex {
+            a: Simple { a: 20 },
+            b: (0, None),
+        },
+        Complex {
+            a: Simple { a: 20 },
+            b: (0, None),
+        },
+    );
+    this.insert(
+        Complex {
+            a: Simple { a: 300 },
+            b: (0, None),
+        },
+        Complex {
+            a: Simple { a: 300 },
+            b: (0, None),
+        },
+    );
+
+    let mut other = this.clone();
+
+    other.insert(
+        Complex {
+            a: Simple { a: 20 },
+            b: (0, None),
+        },
+        Complex {
+            a: Simple { a: 25 },
+            b: (0, None),
+        },
+    );
+    other.remove(&Complex {
+        a: Simple { a: 300 },
+        b: (0, None),
+    });
+    other.insert(
+        Complex {
+            a: Simple { a: 4000 },
+            b: (0, None),
+        },
+        Complex {
+            a: Simple { a: 4000 },
+            b: (0, None),
+        },
+    );
+
+    let diff = Diff::serializable(&this, &other);
+
+    assert_yaml_snapshot!(diff, @r###"
+    ---
+    - EnterKey:
+        a:
+          a: 20
+        b:
+          - 0
+          - ~
+    - Enter:
+        Field: a
+    - Enter:
+        Field: a
+    - Value: 25
+    - Exit
+    - Exit
+    - RemoveKey:
+        a:
+          a: 300
+        b:
+          - 0
+          - ~
+    - AddKey:
+        a:
+          a: 4000
+        b:
+          - 0
+          - ~
+    - Value:
+        a:
+          a: 4000
+        b:
+          - 0
+          - ~
+    - Exit
+    "###);
+
+    roundtrip(this, other);
+}
+
+#[test]
+fn test_hashmap() {
+    use std::collections::HashMap;
+    use std::{collections::hash_map::DefaultHasher, hash::BuildHasherDefault};
+    type Hasher = BuildHasherDefault<DefaultHasher>;
+
+    let mut this = HashMap::with_hasher(Hasher::default());
+
+    this.insert(Simple { a: 0 }, Simple { a: 0 });
+    this.insert(Simple { a: 20 }, Simple { a: 20 });
+    this.insert(Simple { a: 300 }, Simple { a: 300 });
+
+    let mut other = this.clone();
+
+    other.insert(Simple { a: 20 }, Simple { a: 25 });
+    other.remove(&Simple { a: 300 });
+    other.insert(Simple { a: 4000 }, Simple { a: 4000 });
+
+    let diff = Diff::serializable(&this, &other);
+
+    assert_yaml_snapshot!(diff, @r###"
+    ---
+    - EnterKey:
+        a: 20
+    - Enter:
+        Field: a
+    - Value: 25
+    - Exit
+    - RemoveKey:
+        a: 300
+    - AddKey:
+        a: 4000
+    - Value:
+        a: 4000
+    - Exit
+    "###);
+
+    roundtrip(this, other);
+}
+
+#[test]
+fn test_hashmap_ints() {
+    use std::collections::HashMap;
+    use std::{collections::hash_map::DefaultHasher, hash::BuildHasherDefault};
+    type Hasher = BuildHasherDefault<DefaultHasher>;
+
+    let mut this = HashMap::with_hasher(Hasher::default());
+
+    this.insert(0, 0);
+    this.insert(20, 20);
+    this.insert(300, 300);
+
+    let mut other = this.clone();
+
+    other.insert(20, 25);
+    other.remove(&300);
+    other.insert(4000, 4000);
+
+    let diff = &Diff::serializable(&this, &other);
+    let diff_str = serde_json::to_string(diff).unwrap();
+    let mut deserializer = serde_json::Deserializer::from_str(&diff_str);
+
+    assert_yaml_snapshot!(&this, @r###"
+    ---
+    0: 0
+    20: 20
+    300: 300
+    "###);
+    assert_yaml_snapshot!(&other, @r###"
+    ---
+    0: 0
+    20: 25
+    4000: 4000
+    "###);
+    assert_yaml_snapshot!(&diff, @r###"
+    ---
+    - EnterKey: 20
+    - Value: 25
+    - RemoveKey: 300
+    - AddKey: 4000
+    - Value: 4000
+    - Exit
+    "###);
+
+    let mut this_and_that = this.clone();
+    Apply::apply(&mut deserializer, &mut this_and_that).unwrap();
+
+    assert_eq!(&this_and_that, &other);
+
+    roundtrip(this, other);
+}
+
+#[test]
+fn test_hashmap_int_struct() {
+    use std::collections::HashMap;
+    use std::{collections::hash_map::DefaultHasher, hash::BuildHasherDefault};
+    type Hasher = BuildHasherDefault<DefaultHasher>;
+
+    let mut this = HashMap::with_hasher(Hasher::default());
+
+    this.insert(0, Simple { a: 0 });
+    this.insert(20, Simple { a: 20 });
+    this.insert(300, Simple { a: 300 });
+
+    let mut other = this.clone();
+
+    other.insert(20, Simple { a: 25 });
+    other.remove(&300);
+    other.insert(4000, Simple { a: 4000 });
+
+    let diff = &Diff::serializable(&this, &other);
+    let diff_str = serde_json::to_string(diff).unwrap();
+    let mut deserializer = serde_json::Deserializer::from_str(&diff_str);
+
+    assert_yaml_snapshot!(&this, @r###"
+    ---
+    0:
+      a: 0
+    20:
+      a: 20
+    300:
+      a: 300
+    "###);
+    assert_yaml_snapshot!(&other, @r###"
+    ---
+    0:
+      a: 0
+    20:
+      a: 25
+    4000:
+      a: 4000
+    "###);
+    assert_yaml_snapshot!(&diff, @r###"
+    ---
+    - EnterKey: 20
+    - Enter:
+        Field: a
+    - Value: 25
+    - Exit
+    - RemoveKey: 300
+    - AddKey: 4000
+    - Value:
+        a: 4000
+    - Exit
+    "###);
+
+    let mut this_and_that = this.clone();
+    Apply::apply(&mut deserializer, &mut this_and_that).unwrap();
+
+    assert_eq!(&this_and_that, &other);
+    // let diff = Diff::serializable(&this, &other);
+
+    roundtrip(this, other);
 }

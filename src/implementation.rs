@@ -6,12 +6,7 @@ use crate::{
 
 use serde::{de, ser::SerializeSeq, Deserialize, Serialize};
 
-use std::{
-    borrow::Cow,
-    cell::Cell,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    hash::Hash,
-};
+use std::{borrow::Cow, cell::Cell, collections::{BTreeMap, BTreeSet, HashMap, HashSet}, hash::{BuildHasher, Hash}};
 
 macro_rules! array_impls {
     ($($len:tt)+) => {
@@ -149,11 +144,21 @@ tuple_impls! {
 }
 /// Implement SerdeDiff on a "map-like" type such as HashMap.
 macro_rules! map_serde_diff {
-    ($t:ty, $($extra_traits:path),*) => {
-        impl<K, V> SerdeDiff for $t
+    (
+        $t:ident<$($generics:tt),*>
+        $(where
+            $(
+                $bounded_type:ident: $bound:path
+            ),+
+        )?
+    ) => {
+        impl<$($generics,)*> SerdeDiff for $t <$($generics,)*>
         where
-            K: SerdeDiff + Serialize + for<'a> Deserialize<'a> $(+ $extra_traits)*, // + Hash + Eq,
+            K: SerdeDiff + Serialize + for<'a> Deserialize<'a>,
             V: SerdeDiff + Serialize + for<'a> Deserialize<'a>,
+            $($(
+                $bounded_type : $bound,
+            )+)?
         {
             fn diff<'a, S: SerializeSeq>(
                 &self,
@@ -174,6 +179,7 @@ macro_rules! map_serde_diff {
                             if <V as SerdeDiff>::diff(self_value, &mut subctx, other_value)? {
                                 changed = true;
                             }
+                            subctx.pop_path_element()?;
                         },
                         None => {
                             ctx.save_command(&DiffCommandRef::RemoveKey(key), true, true)?;
@@ -236,8 +242,12 @@ macro_rules! map_serde_diff {
     };
 }
 
-map_serde_diff!(HashMap<K, V>, Hash, Eq);
-map_serde_diff!(BTreeMap<K, V>, Ord);
+map_serde_diff!(HashMap<K, V, H> where K: Hash, K: Eq, H: BuildHasher);
+map_serde_diff!(BTreeMap<K, V> where K: Ord);
+#[cfg(feature = "im")]
+use im::HashMap as ImHashMap;
+#[cfg(feature = "im")]
+map_serde_diff!(ImHashMap<K, V, H> where K: Hash, K: Eq, K: Clone, V: Clone, H: BuildHasher);
 
 /// Implement SerdeDiff on a "set-like" type such as HashSet.
 macro_rules! set_serde_diff {
