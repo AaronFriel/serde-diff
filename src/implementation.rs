@@ -385,6 +385,7 @@ opaque_serde_diff!(std::num::NonZeroU8);
 opaque_serde_diff!(std::num::NonZeroU16);
 opaque_serde_diff!(std::num::NonZeroU32);
 opaque_serde_diff!(std::num::NonZeroU64);
+opaque_serde_diff!(std::num::NonZeroUsize);
 opaque_serde_diff!(std::time::Duration);
 opaque_serde_diff!(std::time::SystemTime);
 opaque_serde_diff!(std::net::IpAddr);
