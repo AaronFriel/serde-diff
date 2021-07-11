@@ -624,56 +624,115 @@ pub enum DiffPathElementValue<'a> {
     AddToCollection,
 }
 
+
+fn generic_vec_diff<T: SerdeDiff + Serialize + for<'a> Deserialize<'a>, S: SerializeSeq>(
+    mut self_iter: std::slice::Iter<T>,
+    mut other_iter: std::slice::Iter<T>,
+    ctx: &mut DiffContext<S>,
+) -> Result<bool, <S as SerializeSeq>::Error> {
+    let mut idx = 0;
+    let mut need_exit = false;
+    let mut changed = false;
+    loop {
+        let self_item = self_iter.next();
+        let other_item = other_iter.next();
+        match (self_item, other_item) {
+            (None, None) => break,
+            (Some(_), None) => {
+                let mut num_to_remove = 1;
+                while self_iter.next().is_some() {
+                    num_to_remove += 1;
+                }
+                ctx.save_command::<()>(&DiffCommandRef::Remove(num_to_remove), true, true)?;
+                changed = true;
+                need_exit = false;
+            }
+            (None, Some(other_item)) => {
+                ctx.save_command::<()>(
+                    &DiffCommandRef::Enter(DiffPathElementValue::AddToCollection),
+                    false,
+                    true,
+                )?;
+                ctx.save_command(&DiffCommandRef::Value(other_item), true, true)?;
+                need_exit = true;
+                changed = true;
+            }
+            (Some(self_item), Some(other_item)) => {
+                ctx.push_collection_index(idx);
+                if <T as SerdeDiff>::diff(self_item, ctx, other_item)? {
+                    need_exit = true;
+                    changed = true;
+                }
+                ctx.pop_path_element()?;
+            }
+        }
+        idx += 1;
+    }
+    if need_exit {
+        ctx.save_command::<()>(&DiffCommandRef::Exit, true, false)?;
+    }
+    Ok(changed)
+}
+
+fn generic_vec_apply<
+    'de,
+    T: SerdeDiff + Serialize + for<'a> Deserialize<'a>,
+    A: de::SeqAccess<'de>,
+>(
+    this: &mut impl VecLike<T>,
+    ctx: &mut ApplyContext,
+    seq: &mut A,
+) -> Result<bool, <A as de::SeqAccess<'de>>::Error> {
+    let mut changed = false;
+    while let Some(cmd) = ctx.read_next_command::<A, T>(seq)? {
+        use DiffCommandValue::*;
+        use DiffPathElementValue::*;
+        match cmd {
+            // we should not be getting fields when reading collection commands
+            Enter(Field(_)) => {
+                ctx.skip_value(seq)?;
+                break;
+            }
+            Enter(CollectionIndex(idx)) => {
+                if let Some(value_ref) = this.get_mut(idx) {
+                    changed |= <T as SerdeDiff>::apply(value_ref, seq, ctx)?;
+                } else {
+                    ctx.skip_value(seq)?;
+                }
+            }
+            Enter(AddToCollection) => {
+                if let Value(v) = ctx
+                    .read_next_command(seq)?
+                    .expect("Expected value after AddToCollection")
+                {
+                    changed = true;
+                    this.push(v);
+                } else {
+                    panic!("Expected value after AddToCollection");
+                }
+            }
+            Remove(num_elements) => {
+                let new_length = this.len().saturating_sub(num_elements);
+                this.truncate(new_length);
+                changed = true;
+                break;
+            }
+            _ => break,
+        }
+    }
+    Ok(changed)
+}
+
 impl<T: SerdeDiff + Serialize + for<'a> Deserialize<'a>> SerdeDiff for Vec<T> {
+    #[inline]
     fn diff<'a, S: SerializeSeq>(
         &self,
         ctx: &mut DiffContext<'a, S>,
         other: &Self,
     ) -> Result<bool, S::Error> {
-        let mut self_iter = self.iter();
-        let mut other_iter = other.iter();
-        let mut idx = 0;
-        let mut need_exit = false;
-        let mut changed = false;
-        loop {
-            let self_item = self_iter.next();
-            let other_item = other_iter.next();
-            match (self_item, other_item) {
-                (None, None) => break,
-                (Some(_), None) => {
-                    let mut num_to_remove = 1;
-                    while self_iter.next().is_some() {
-                        num_to_remove += 1;
-                    }
-                    ctx.save_command::<()>(&DiffCommandRef::Remove(num_to_remove), true, true)?;
-                    changed = true;
-                    need_exit = false;
-                }
-                (None, Some(other_item)) => {
-                    ctx.save_command::<()>(
-                        &DiffCommandRef::Enter(DiffPathElementValue::AddToCollection),
-                        false,
-                        true,
-                    )?;
-                    ctx.save_command(&DiffCommandRef::Value(other_item), true, true)?;
-                    need_exit = true;
-                    changed = true;
-                }
-                (Some(self_item), Some(other_item)) => {
-                    ctx.push_collection_index(idx);
-                    if <T as SerdeDiff>::diff(self_item, ctx, other_item)? {
-                        need_exit = true;
-                        changed = true;
-                    }
-                    ctx.pop_path_element()?;
-                }
-            }
-            idx += 1;
-        }
-        if need_exit {
-            ctx.save_command::<()>(&DiffCommandRef::Exit, true, false)?;
-        }
-        Ok(changed)
+        let self_iter = self.iter();
+        let other_iter = other.iter();
+        generic_vec_diff(self_iter, other_iter, ctx)
     }
 
     fn apply<'de, A>(
@@ -684,43 +743,74 @@ impl<T: SerdeDiff + Serialize + for<'a> Deserialize<'a>> SerdeDiff for Vec<T> {
     where
         A: de::SeqAccess<'de>,
     {
-        let mut changed = false;
-        while let Some(cmd) = ctx.read_next_command::<A, T>(seq)? {
-            use DiffCommandValue::*;
-            use DiffPathElementValue::*;
-            match cmd {
-                // we should not be getting fields when reading collection commands
-                Enter(Field(_)) => {
-                    ctx.skip_value(seq)?;
-                    break;
-                }
-                Enter(CollectionIndex(idx)) => {
-                    if let Some(value_ref) = self.get_mut(idx) {
-                        changed |= <T as SerdeDiff>::apply(value_ref, seq, ctx)?;
-                    } else {
-                        ctx.skip_value(seq)?;
-                    }
-                }
-                Enter(AddToCollection) => {
-                    if let Value(v) = ctx
-                        .read_next_command(seq)?
-                        .expect("Expected value after AddToCollection")
-                    {
-                        changed = true;
-                        self.push(v);
-                    } else {
-                        panic!("Expected value after AddToCollection");
-                    }
-                }
-                Remove(num_elements) => {
-                    let new_length = self.len().saturating_sub(num_elements);
-                    self.truncate(new_length);
-                    changed = true;
-                    break;
-                }
-                _ => break,
-            }
-        }
-        Ok(changed)
+        generic_vec_apply(self, ctx, seq)
+    }
+}
+
+#[cfg(feature = "smallvec")]
+impl<T: SerdeDiff + Serialize + for<'a> Deserialize<'a>, const N: usize> SerdeDiff
+    for smallvec::SmallVec<[T; N]>
+{
+    fn diff<'a, S: SerializeSeq>(
+        &self,
+        ctx: &mut DiffContext<'a, S>,
+        other: &Self,
+    ) -> Result<bool, S::Error> {
+        generic_vec_diff(self.iter(), other.iter(), ctx)
+    }
+
+    fn apply<'de, A>(
+        &mut self,
+        seq: &mut A,
+        ctx: &mut ApplyContext,
+    ) -> Result<bool, <A as de::SeqAccess<'de>>::Error>
+    where
+        A: de::SeqAccess<'de>,
+    {
+        generic_vec_apply(self, ctx, seq)
+    }
+}
+
+trait VecLike<T> {
+    fn get_mut(&mut self, index: usize) -> Option<&mut T>;
+    fn push(&mut self, value: T);
+    fn len(&self) -> usize;
+    fn truncate(&mut self, len: usize);
+}
+
+impl<T> VecLike<T> for Vec<T> {
+    fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        (self as &mut [T]).get_mut(index)
+    }
+
+    fn push(&mut self, value: T) {
+        self.push(value)
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.truncate(len)
+    }
+}
+
+#[cfg(feature = "smallvec")]
+impl<T, const N: usize> VecLike<T> for smallvec::SmallVec<[T; N]> {
+    fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        (self as &mut [T]).get_mut(index)
+    }
+
+    fn push(&mut self, value: T) {
+        self.push(value)
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.truncate(len)
     }
 }
