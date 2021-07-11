@@ -13,75 +13,56 @@ use std::{
     hash::{BuildHasher, Hash},
 };
 
-macro_rules! array_impls {
-    ($($len:tt)+) => {
-        $(
-            impl<T: $crate::SerdeDiff + serde::Serialize + for<'a> serde::Deserialize<'a>> $crate::SerdeDiff for [T; $len] {
-                fn diff<'a, S: serde::ser::SerializeSeq>(
-                    &self,
-                    ctx: &mut $crate::difference::DiffContext<'a, S>,
-                    other: &Self,
-                ) -> Result<bool, S::Error> {
-                    use $crate::difference::DiffCommandRef;
-
-                    let mut need_exit = false;
-                    let mut changed = false;
-                    for (idx, (self_item, other_item)) in self.iter().zip(other.iter()).enumerate() {
-                        ctx.push_collection_index(idx);
-                        if <T as $crate::SerdeDiff>::diff(self_item, ctx, other_item)? {
-                            need_exit = true;
-                            changed = true;
-                        }
-                        ctx.pop_path_element()?;
-                    }
-                    if need_exit {
-                        ctx.save_command::<()>(&DiffCommandRef::Exit, true, false)?;
-                    }
-                    Ok(changed)
-                }
-
-                fn apply<'de, A>(
-                    &mut self,
-                    seq: &mut A,
-                    ctx: &mut $crate::apply::ApplyContext,
-                ) -> Result<bool, <A as serde::de::SeqAccess<'de>>::Error>
-                where
-                    A: serde::de::SeqAccess<'de>,
-                {
-                    let mut changed = false;
-                    while let Some(cmd) = ctx.read_next_command::<A, T>(seq)? {
-                        use $crate::difference::DiffCommandValue::*;
-                        use $crate::difference::DiffPathElementValue::*;
-                        match cmd {
-                            // we should not be getting fields when reading collection commands
-                            Enter(Field(_)) => {
-                                ctx.skip_value(seq)?;
-                                break;
-                            }
-                            Enter(CollectionIndex(idx)) => {
-                                if let Some(value_ref) = self.get_mut(idx) {
-                                    changed |= <T as $crate::SerdeDiff>::apply(value_ref, seq, ctx)?;
-                                } else {
-                                    ctx.skip_value(seq)?;
-                                }
-                            }
-                            _ => break,
-                        }
-                    }
-                    Ok(changed)
-                }
+impl<T: SerdeDiff + Serialize + for<'a> Deserialize<'a>, const N: usize> SerdeDiff for [T; N] {
+    fn diff<'a, S: serde::ser::SerializeSeq>(
+        &self,
+        ctx: &mut DiffContext<'a, S>,
+        other: &Self,
+    ) -> Result<bool, S::Error> {
+        let mut need_exit = false;
+        let mut changed = false;
+        for (idx, (self_item, other_item)) in self.iter().zip(other.iter()).enumerate() {
+            ctx.push_collection_index(idx);
+            if <T as SerdeDiff>::diff(self_item, ctx, other_item)? {
+                need_exit = true;
+                changed = true;
             }
-        )+
+            ctx.pop_path_element()?;
+        }
+        if need_exit {
+            ctx.save_command::<()>(&DiffCommandRef::Exit, true, false)?;
+        }
+        Ok(changed)
     }
-}
-
-array_impls! {
-    01 02 03 04 05 06 07 08 09 10
-    11 12 13 14 15 16 17 18 19 20
-    21 22 23 24 25 26 27 28 29 30
-    31 32
-    40 48 50 56 64 72 96 100 128 160 192 200 224 256 384 512
-    768 1024 2048 4096 8192 16384 32768 65536
+    fn apply<'de, A>(
+        &mut self,
+        seq: &mut A,
+        ctx: &mut crate::apply::ApplyContext,
+    ) -> Result<bool, <A as serde::de::SeqAccess<'de>>::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        use crate::difference::DiffCommandValue::*;
+        use crate::difference::DiffPathElementValue::*;
+        let mut changed = false;
+        while let Some(cmd) = ctx.read_next_command::<A, T>(seq)? {
+            match cmd {
+                Enter(Field(_)) => {
+                    ctx.skip_value(seq)?;
+                    break;
+                }
+                Enter(CollectionIndex(idx)) => {
+                    if let Some(value_ref) = self.get_mut(idx) {
+                        changed |= <T as SerdeDiff>::apply(value_ref, seq, ctx)?;
+                    } else {
+                        ctx.skip_value(seq)?;
+                    }
+                }
+                _ => break,
+            }
+        }
+        Ok(changed)
+    }
 }
 
 macro_rules! tuple_impls {
