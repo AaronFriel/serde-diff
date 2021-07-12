@@ -3,7 +3,7 @@ use crate::{
     FieldPathMode, SerdeDiff,
 };
 use serde::{de, ser::SerializeSeq, Deserialize, Serialize, Serializer};
-use std::{borrow::Cow, cell::Cell};
+use std::{borrow::Cow, cell::Cell, collections::VecDeque};
 
 /// Used during a diff operation for transient data used during the diff
 #[doc(hidden)]
@@ -624,12 +624,15 @@ pub enum DiffPathElementValue<'a> {
     AddToCollection,
 }
 
-
-fn generic_vec_diff<T: SerdeDiff + Serialize + for<'a> Deserialize<'a>, S: SerializeSeq>(
-    mut self_iter: std::slice::Iter<T>,
-    mut other_iter: std::slice::Iter<T>,
+fn generic_vec_diff<'t, T, S>(
+    mut self_iter: impl Iterator<Item = &'t T>,
+    mut other_iter: impl Iterator<Item = &'t T>,
     ctx: &mut DiffContext<S>,
-) -> Result<bool, <S as SerializeSeq>::Error> {
+) -> Result<bool, <S as SerializeSeq>::Error>
+where
+    T: SerdeDiff + Serialize + for<'a> Deserialize<'a> + 't,
+    S: SerializeSeq,
+{
     let mut idx = 0;
     let mut need_exit = false;
     let mut changed = false;
@@ -747,6 +750,30 @@ impl<T: SerdeDiff + Serialize + for<'a> Deserialize<'a>> SerdeDiff for Vec<T> {
     }
 }
 
+impl<T: SerdeDiff + Serialize + for<'a> Deserialize<'a>> SerdeDiff for VecDeque<T> {
+    #[inline]
+    fn diff<'a, S: SerializeSeq>(
+        &self,
+        ctx: &mut DiffContext<'a, S>,
+        other: &Self,
+    ) -> Result<bool, S::Error> {
+        let self_iter = self.iter();
+        let other_iter = other.iter();
+        generic_vec_diff(self_iter, other_iter, ctx)
+    }
+
+    fn apply<'de, A>(
+        &mut self,
+        seq: &mut A,
+        ctx: &mut ApplyContext,
+    ) -> Result<bool, <A as de::SeqAccess<'de>>::Error>
+    where
+        A: de::SeqAccess<'de>,
+    {
+        generic_vec_apply(self, ctx, seq)
+    }
+}
+
 #[cfg(feature = "smallvec")]
 impl<T: SerdeDiff + Serialize + for<'a> Deserialize<'a>, const N: usize> SerdeDiff
     for smallvec::SmallVec<[T; N]>
@@ -785,6 +812,24 @@ impl<T> VecLike<T> for Vec<T> {
 
     fn push(&mut self, value: T) {
         self.push(value)
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.truncate(len)
+    }
+}
+
+impl<T> VecLike<T> for VecDeque<T> {
+    fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        VecDeque::<T>::get_mut(self, index)
+    }
+
+    fn push(&mut self, value: T) {
+        self.push_back(value)
     }
 
     fn len(&self) -> usize {
